@@ -1,0 +1,7 @@
+__pycache__/
+*.py[cod]
+.DS_Store
+tmp/*.fast5
+tmp/*.sqlite
+*.fast5
+*.pod5
