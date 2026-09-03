@@ -109,6 +109,24 @@ python pod5_to_bulk_fast5.py validate tmp/test_512ch_30s.fast5
 final acceptance test must be playback in the same Ubuntu/MinKNOW container and
 protocol configuration used by readfish.
 
+## Test suite
+
+The repository includes generated fixtures under `tests/data/`. Because the
+FAST5 fixtures are binary files, Git LFS tracks them.
+
+```bash
+git lfs install
+git lfs pull
+conda activate pod5-bulk-playback
+pytest -q
+```
+
+The tests check the reusable cache, 512-channel bulk structure, gzip and VBZ
+readability, reconstructed auxiliary groups, and the intentionally empty ASIC
+command history. When the original POD5 remains in the parent directory, an
+optional integration test also confirms that a complete 116,877-sample read is
+bit-for-bit identical in the generated bulk FAST5.
+
 ## Storage planning
 
 A 5 kHz, 512-channel run contains 5,120,000 raw bytes per second before
