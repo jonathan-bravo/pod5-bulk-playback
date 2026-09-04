@@ -35,15 +35,27 @@ To update an existing environment after `environment.yml` changes:
 conda env update -n pod5-bulk-playback -f environment.yml --prune
 ```
 
-## 1. Create the reusable background cache once
+## 1. Use or rebuild the reusable background cache
 
-The donor bulk FAST5 is only required for this step. The command reads the
-state tables and short signal slices classified as `pore`; it does not read the
-complete 22 GB signal.
+A reusable R10.4.1 5 kHz background cache is already included in this repository
+as `background_r10_4_1_5khz.h5`, so normal conversions can skip this step and
+use that file directly with `--background-cache`.
+
+To rebuild the cache from the original open-access NA12878 human donor bulk
+FAST5, download the R10.4 5 kHz bulk file from the readfish playback dataset:
+
+```bash
+curl -L -o GXB02001_20230509_1250_FAW79338_X3_sequencing_run_NA12878_B1_19382aa5_ef4362cd.fast5 \
+  https://s3.amazonaws.com/nanopore-human-wgs/bulkfile/GXB02001_20230509_1250_FAW79338_X3_sequencing_run_NA12878_B1_19382aa5_ef4362cd.fast5
+```
+
+The donor bulk FAST5 is only required when rebuilding the cache. The command
+reads the state tables and short signal slices classified as `pore`; it does not
+read the complete 22 GB signal.
 
 ```bash
 python pod5_to_bulk_fast5.py make-background \
-  ../GXB02001_20230509_1250_FAW79338_X3_sequencing_run_NA12878_B1_19382aa5_ef4362cd.fast5 \
+  GXB02001_20230509_1250_FAW79338_X3_sequencing_run_NA12878_B1_19382aa5_ef4362cd.fast5 \
   background_r10_4_1_5khz.h5
 ```
 
