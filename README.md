@@ -133,6 +133,10 @@ A 5 kHz, 512-channel run contains 5,120,000 raw bytes per second before
 compression. Output size depends strongly on run duration and compressibility.
 Check free space before converting all 22 shards and retain the POD5 sources.
 
+## License
+
+This project is licensed under the GNU General Public License v3.0. See [LICENSE](LICENSE).
+
 ## Sources
 
 - ONT POD5 specification (read `start`, channel, calibration, and signal table):
