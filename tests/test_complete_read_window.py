@@ -22,6 +22,17 @@ def args_for(*options):
     ])
 
 
+@pytest.mark.parametrize("options,expected", [
+    ([], False),
+    (["--exclude-forced"], True),
+    (["--no-exclude-forced"], False),
+    (["--max-duration-seconds", "30", "--complete-reads-only"], False),
+    (["--max-duration-seconds", "30", "--complete-reads-only", "--exclude-forced"], True),
+])
+def test_forced_reads_included_by_default_independently_of_window(options, expected):
+    assert args_for(*options).exclude_forced is expected
+
+
 def test_window_offset_uses_selected_origin():
     summary = {
         "run_info": {"sample_rate": 10}, "source_min_start": 100, "source_max_end": 1000,
@@ -115,7 +126,7 @@ def test_window_signal_auxiliary_and_report(tmp_path, monkeypatch, capsys, compl
         "--no-device-metadata", "--window-start-seconds", str(origin / 5000),
         "--max-duration-seconds", str(window_length / 5000),
         *(["--complete-reads-only"] if complete else []),
-        *([] if exclude_forced else ["--no-exclude-forced"]),
+        *(["--exclude-forced"] if exclude_forced else []),
     )
     args.inputs = [str(source)]
     converter.convert(args)

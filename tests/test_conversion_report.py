@@ -33,7 +33,7 @@ def test_report_flags_and_output_counts(tmp_path, seconds, hours):
     args = converter.parser().parse_args([
         "convert", str(source), "--output", str(output),
         "--background-cache", "cache.h5", "--channels", "1",
-        "--max-duration-seconds", str(seconds),
+        "--max-duration-seconds", str(seconds), "--exclude-forced",
     ])
     summary = {
         "run_info": {"sample_rate": 5000, "sequencing_kit": "sqk-rbk114-24",

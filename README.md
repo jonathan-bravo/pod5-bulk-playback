@@ -82,8 +82,8 @@ python pod5_to_bulk_fast5.py convert '/data/run/*.pod5' \
 
 Defaults chosen for this project:
 
-- all forced reads (including previous unblocks and mux-change terminations) are
-  excluded;
+- all recorded reads, including forced-ended reads from previous unblocks and
+  mux-change terminations, are included;
 - the timeline starts at acquisition sample zero and ends at the latest end of
   **all supplied reads**, including excluded reads;
 - original acquisition-relative channel/read timing is preserved;
@@ -96,7 +96,9 @@ A following shard contains later read records, not the missing continuation of
 an unblocked read. Excluding forced reads replaces their intervals with donor
 open-pore background.
 
-Use `--no-exclude-forced` to retain them. Filtering changes which signals are
+Forced-ended reads are valid captured signal and are now retained by default
+(`--no-exclude-forced` makes this explicit). Use `--exclude-forced` only if you
+want the previous exclusion behavior. Filtering changes which signals are
 overlaid, not the default timeline. Do not combine POD5 files with different
 acquisition IDs, even when all reads from one acquisition would be filtered out.
 
@@ -165,8 +167,9 @@ background behind; reads are not moved together or extended. The same selection
 is used for raw signal and reconstructed read/mux/state tables. If no reads fit,
 the output is background-only and a warning is printed.
 
-This option is independent of forced-read filtering: use `--no-exclude-forced`
-if you also want to retain recorded unblock/mux-change reads that fit the window.
+This option is independent of forced-read filtering: recorded unblock/mux-change
+reads that fit the window are included by default. Use `--exclude-forced` only
+if you explicitly want to omit those reads as well.
 "Complete" here means the entire **recorded signal**, not necessarily an entire
 molecule. Without `--complete-reads-only`, boundary-crossing reads are still
 clipped, preserving the previous test-window behavior.

@@ -807,7 +807,10 @@ def parser() -> argparse.ArgumentParser:
         "--complete-reads-only", action="store_true",
         help="Skip reads crossing either output boundary instead of clipping them; independent of forced-read filtering",
     )
-    c.add_argument("--exclude-forced", action=argparse.BooleanOptionalAction, default=True)
+    c.add_argument(
+        "--exclude-forced", action=argparse.BooleanOptionalAction, default=False,
+        help="Opt in to excluding forced-ended reads (e.g. unblocks/mux changes); included by default",
+    )
     c.add_argument("--auxiliary", choices=("none", "reconstructed"), default="reconstructed")
     c.add_argument("--device-metadata", action=argparse.BooleanOptionalAction, default=True)
     c.add_argument("--compression", choices=("vbz", "gzip", "none"), default="vbz")
