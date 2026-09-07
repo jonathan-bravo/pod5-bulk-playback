@@ -97,3 +97,85 @@ def test_index_counts_excluded_reasons_and_source_timing(tmp_path, monkeypatch, 
     assert summary["source_max_end"] == 300
     assert summary["min_start"] == (200 if exclude else 0)
     assert summary["end_reasons"]["unblock"]["excluded"] == removed
+
+
+@pytest.mark.parametrize("timeline,origin_mode,origin,duration", [
+    ("source", "absolute", 0, 1000),
+    ("source", "rebase", 100, 900),
+    ("retained", "absolute", 0, 800),
+    ("retained", "rebase", 200, 600),
+])
+def test_independent_timeline_and_origin(timeline, origin_mode, origin, duration):
+    args = converter.parser().parse_args([
+        "convert", "input.pod5", "--output", "out.fast5", "--background-cache", "cache.h5",
+        "--timeline", timeline, "--time-origin", origin_mode,
+    ])
+    summary = {
+        "run_info": {"sample_rate": 10}, "source_min_start": 100, "source_max_end": 1000,
+        "min_start": 200, "max_end": 800,
+    }
+    assert converter.resolve_timeline(args, summary) == (origin, duration)
+    if timeline == "source":
+        summary.update(min_start=400, max_end=600)
+        assert converter.resolve_timeline(args, summary) == (origin, duration)
+
+
+def test_explicit_duration_and_test_cap():
+    base = ["convert", "input.pod5", "--output", "out.fast5", "--background-cache", "cache.h5"]
+    summary = {
+        "run_info": {"sample_rate": 10}, "source_min_start": 100, "source_max_end": 1000,
+        "min_start": 200, "max_end": 800,
+    }
+    parser = converter.parser()
+    assert converter.resolve_timeline(parser.parse_args(base), summary) == (0, 1000)
+    for seconds in (100, 120):
+        args = parser.parse_args(base + ["--duration-seconds", str(seconds)])
+        assert converter.resolve_timeline(args, summary) == (0, seconds * 10)
+    args = parser.parse_args(base + ["--time-origin", "rebase", "--duration-seconds", "120"])
+    assert converter.resolve_timeline(args, summary) == (100, 1200)
+    args = parser.parse_args(base + ["--duration-seconds", "99"])
+    with pytest.raises(ValueError, match="cannot shorten"):
+        converter.resolve_timeline(args, summary)
+    args = parser.parse_args(base + ["--max-duration-seconds", "30"])
+    assert converter.resolve_timeline(args, summary) == (0, 300)
+    args = parser.parse_args(base + ["--max-duration-seconds", "0.001"])
+    with pytest.raises(ValueError, match="at least one sample"):
+        converter.resolve_timeline(args, summary)
+    with pytest.raises(SystemExit):
+        parser.parse_args(base + ["--duration-seconds", "120", "--max-duration-seconds", "30"])
+
+
+@pytest.mark.parametrize("value", ["0", "-1", "nan", "inf", "-inf"])
+@pytest.mark.parametrize("flag", ["--duration-seconds", "--max-duration-seconds"])
+def test_invalid_duration_arguments(value, flag):
+    with pytest.raises(SystemExit):
+        converter.parser().parse_args([
+            "convert", "input.pod5", "--output", "out.fast5", "--background-cache", "cache.h5",
+            f"{flag}={value}",
+        ])
+
+
+def test_excluded_reads_cannot_hide_another_acquisition(tmp_path, monkeypatch):
+    monkeypatch.setattr(converter, "run_info_dict", lambda ri: {"acquisition_id": ri.acquisition_id})
+
+    class Reader:
+        def __init__(self, path):
+            pass
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *args):
+            pass
+
+        def reads(self):
+            for run in ("one", "two"):
+                yield SimpleNamespace(
+                    start_sample=0, sample_count=100,
+                    end_reason=SimpleNamespace(forced=True, name="unblock"),
+                    run_info=SimpleNamespace(acquisition_id=run),
+                )
+
+    monkeypatch.setattr(converter.pod5, "Reader", Reader)
+    with pytest.raises(ValueError, match="2 acquisition IDs"):
+        converter.build_index([tmp_path / "source.pod5"], tmp_path / "index.sqlite", True)

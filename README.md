@@ -84,8 +84,9 @@ Defaults chosen for this project:
 
 - all forced reads (including previous unblocks and mux-change terminations) are
   excluded;
-- the earliest retained read is rebased to sample zero;
-- original relative channel/read timing is preserved;
+- the timeline starts at acquisition sample zero and ends at the latest end of
+  **all supplied reads**, including excluded reads;
+- original acquisition-relative channel/read timing is preserved;
 - 512 channels are emitted;
 - VBZ compression is used; and
 - reconstructed auxiliary tables and device metadata are written.
@@ -95,9 +96,45 @@ A following shard contains later read records, not the missing continuation of
 an unblocked read. Excluding forced reads replaces their intervals with donor
 open-pore background.
 
-Use `--no-exclude-forced` to retain them. Use `--time-origin absolute` only when
-leading time from acquisition start is important; it can make the output much
-larger. Do not combine POD5 files with different acquisition IDs.
+Use `--no-exclude-forced` to retain them. Filtering changes which signals are
+overlaid, not the default timeline. Do not combine POD5 files with different
+acquisition IDs, even when all reads from one acquisition would be filtered out.
+
+### Full-run versus compact timing
+
+The default `--timeline source --time-origin absolute` preserves acquisition
+start through the latest supplied read end. For a partial dataset recorded late
+in a run, this can create a large leading background interval. It does **not**
+recover missing reads or prove the inputs cover the full experiment.
+
+For compact tests, use the previous timing behavior explicitly:
+
+```bash
+--timeline retained --time-origin rebase
+```
+
+`--timeline` chooses which reads establish the time bounds (`source`: all input
+reads; `retained`: only reads surviving filtering). `--time-origin` independently
+chooses sample zero: acquisition start (`absolute`) or the earliest read in the
+selected bounds (`rebase`). All relative read/channel timing remains unchanged.
+
+POD5 does not establish the experiment stop time after the last read. If you
+know the full duration, supply it in seconds; for example, with the default
+absolute origin, a known 22-hour experiment can use:
+
+```bash
+--duration-seconds 79200
+```
+
+This specifies total output length from the chosen origin, not extra padding.
+It may extend the selected timeline with background but cannot shorten it.
+`--max-duration-seconds` instead caps output length for tests and may still clip
+reads at the boundary. These options are mutually exclusive. Complete-read test
+window selection is not implemented yet. Conversions still fail if no reads
+remain after filtering.
+
+**Compatibility:** the default used to be retained/rebased timing. Add
+`--timeline retained --time-origin rebase` to reproduce that behavior.
 
 The metadata index is retained as `tmp/pod5_bulk_index.sqlite` for auditing.
 Only one channel's read signals are held in memory at a time.
@@ -157,6 +194,8 @@ python pod5_to_bulk_fast5.py convert ../FAX54151_4f394667_45b25379_8.pod5 \
   --output tmp/test_512ch_30s.fast5 \
   --tmp-dir tmp \
   --channels 512 \
+  --timeline retained \
+  --time-origin rebase \
   --max-duration-seconds 30
 
 python pod5_to_bulk_fast5.py validate tmp/test_512ch_30s.fast5

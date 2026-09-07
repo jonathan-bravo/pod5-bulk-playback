@@ -13,7 +13,14 @@ converter = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(converter)
 
 
-def test_report_publication_and_failed_forced_rebuild(tmp_path, monkeypatch):
+@pytest.mark.parametrize("timing_flags,expected_origin,expected_duration", [
+    ([], 0, 100),
+    (["--timeline", "retained", "--time-origin", "rebase"], 25, 25),
+    (["--duration-seconds", "1"], 0, 5000),
+])
+def test_report_publication_and_failed_forced_rebuild(
+    tmp_path, monkeypatch, timing_flags, expected_origin, expected_duration,
+):
     source = tmp_path / "input.pod5"
     source.touch()
     output = tmp_path / "output.fast5"
@@ -31,8 +38,8 @@ def test_report_publication_and_failed_forced_rebuild(tmp_path, monkeypatch):
             con.executescript(converter.INDEX_SCHEMA)
         return {
             "run_info": info, "total": 0, "kept": 0, "removed": 0,
-            "end_reasons": {}, "source_min_start": 0, "source_max_end": 50,
-            "min_start": 0, "max_end": 50, "max_channel": 1,
+            "end_reasons": {}, "source_min_start": 10, "source_max_end": 100,
+            "min_start": 25, "max_end": 50, "max_channel": 1,
         }
 
     monkeypatch.setattr(converter, "build_index", index)
@@ -42,11 +49,15 @@ def test_report_publication_and_failed_forced_rebuild(tmp_path, monkeypatch):
         "--background-cache", str(ROOT / "background_r10_4_1_5khz.h5"),
         "--tmp-dir", str(tmp_path / "index"), "--channels", "1",
         "--compression", "gzip", "--auxiliary", "none",
-    ])
+    ] + timing_flags)
     converter.convert(args)
     report = json.loads(report_path.read_text())
     assert report["status"] == "conversion_completed"
-    assert report["timeline"]["duration_samples"] == 50
+    assert report["timeline"]["duration_samples"] == expected_duration
+    assert report["timeline"]["output_origin_sample"] == expected_origin
+    with converter.h5py.File(output, "r") as handle:
+        assert handle["Raw/Channel_1/Signal"].shape == (expected_duration,)
+        assert int(handle["Meta"].attrs["duration_samples"]) == expected_duration
     assert report["output_bytes"] == output.stat().st_size
     assert not Path(str(report_path) + ".tmp").exists()
     with pytest.raises(FileExistsError):

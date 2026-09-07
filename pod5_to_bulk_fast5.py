@@ -285,17 +285,18 @@ def build_index(inputs: list[Path], database: Path, exclude_forced: bool) -> dic
                     source_end = end if source_end is None else max(source_end, end)
                     counts = end_reasons[read.end_reason.name]
                     counts["total"] += 1
-                    if exclude_forced and forced:
-                        removed += 1
-                        counts["excluded"] += 1
-                        continue
-                    counts["retained"] += 1
+                    # Validate run identity even for reads excluded from the signal.
                     ri = read.run_info
                     info = run_info_dict(ri)
                     con.execute(
                         "INSERT OR IGNORE INTO run_info VALUES (?,?)",
                         (ri.acquisition_id, json.dumps(info, sort_keys=True)),
                     )
+                    if exclude_forced and forced:
+                        removed += 1
+                        counts["excluded"] += 1
+                        continue
+                    counts["retained"] += 1
                     rows.append(
                         (
                             file_id, str(read.read_id), read.pore.channel, read.pore.well,
@@ -507,6 +508,39 @@ def write_auxiliary_channel(out: h5py.File, cache: h5py.File, channel: int, rows
     group.create_dataset("States", data=states, maxshape=(None,), chunks=True, compression="gzip", compression_opts=1)
 
 
+def positive_seconds(value: str) -> float:
+    seconds = float(value)
+    if not math.isfinite(seconds) or seconds <= 0:
+        raise argparse.ArgumentTypeError("duration must be finite and greater than zero")
+    return seconds
+
+
+def resolve_timeline(args, summary: dict) -> tuple[int, int]:
+    """Choose bounds independently of which read signals are retained."""
+    rate = int(summary["run_info"]["sample_rate"])
+    if rate <= 0:
+        raise ValueError("Sample rate must be positive")
+    if args.timeline == "source":
+        first, last = summary["source_min_start"], summary["source_max_end"]
+    else:
+        first, last = summary["min_start"], summary["max_end"]
+    origin = int(first) if args.time_origin == "rebase" else 0
+    duration = int(last) - origin
+    if args.duration_seconds is not None:
+        requested = int(round(args.duration_seconds * rate))
+        if requested < duration:
+            raise ValueError(
+                "--duration-seconds cannot shorten the selected timeline; "
+                "use --max-duration-seconds for a clipped test"
+            )
+        duration = requested
+    if args.max_duration_seconds is not None:
+        duration = min(duration, int(round(args.max_duration_seconds * rate)))
+    if duration <= 0:
+        raise ValueError("Output duration must contain at least one sample")
+    return origin, duration
+
+
 def conversion_report(args, summary, inputs, output, cache_path, database, origin, duration, channels):
     """Describe the completed artifact, without changing conversion policy."""
     info = summary["run_info"]
@@ -551,7 +585,7 @@ def conversion_report(args, summary, inputs, output, cache_path, database, origi
             "duration_seconds": duration / rate, "duration_hours": duration / rate / 3600,
         },
         "settings": {key: getattr(args, key) for key in (
-            "time_origin", "exclude_forced", "auxiliary", "device_metadata",
+            "timeline", "time_origin", "duration_seconds", "exclude_forced", "auxiliary", "device_metadata",
             "compression", "chunk_samples", "channels", "max_duration_seconds",
         )},
         "recommended_simulation": {
@@ -590,10 +624,7 @@ def convert(args: argparse.Namespace) -> None:
 
     summary = build_index(inputs, database, args.exclude_forced)
     info = summary["run_info"]
-    origin = summary["min_start"] if args.time_origin == "rebase" else 0
-    duration = summary["max_end"] - origin
-    if args.max_duration_seconds is not None:
-        duration = min(duration, int(round(args.max_duration_seconds * info["sample_rate"])))
+    origin, duration = resolve_timeline(args, summary)
     channels = args.channels or max(512, summary["max_channel"])
     log(json.dumps({**summary, "run_info": info["acquisition_id"], "origin": origin, "duration": duration}, indent=2))
 
@@ -731,14 +762,29 @@ def parser() -> argparse.ArgumentParser:
     c.add_argument("--output", required=True)
     c.add_argument("--background-cache", required=True)
     c.add_argument("--tmp-dir", default="tmp")
-    c.add_argument("--time-origin", choices=("rebase", "absolute"), default="rebase")
+    c.add_argument(
+        "--timeline", choices=("source", "retained"), default="source",
+        help="Timing bounds from all supplied reads (default) or only retained reads",
+    )
+    c.add_argument(
+        "--time-origin", choices=("rebase", "absolute"), default="absolute",
+        help="Start at acquisition zero (default), or the first read in the selected timeline",
+    )
     c.add_argument("--exclude-forced", action=argparse.BooleanOptionalAction, default=True)
     c.add_argument("--auxiliary", choices=("none", "reconstructed"), default="reconstructed")
     c.add_argument("--device-metadata", action=argparse.BooleanOptionalAction, default=True)
     c.add_argument("--compression", choices=("vbz", "gzip", "none"), default="vbz")
     c.add_argument("--chunk-samples", type=int, default=180480)
     c.add_argument("--channels", type=int, help="Testing only; defaults to at least 512")
-    c.add_argument("--max-duration-seconds", type=float, help="Testing only")
+    duration_options = c.add_mutually_exclusive_group()
+    duration_options.add_argument(
+        "--duration-seconds", type=positive_seconds,
+        help="Explicit output length from the chosen origin; may extend but not shorten the timeline",
+    )
+    duration_options.add_argument(
+        "--max-duration-seconds", type=positive_seconds,
+        help="Testing only: cap output length from the chosen origin; may clip reads",
+    )
     c.add_argument("--force", action="store_true")
     c.set_defaults(func=convert)
 
