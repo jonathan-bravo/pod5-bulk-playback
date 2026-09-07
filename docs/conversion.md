@@ -35,6 +35,19 @@ want the previous exclusion behavior. Filtering changes which signals are
 overlaid, not the default timeline. Do not combine POD5 files with different
 acquisition IDs, even when all reads from one acquisition would be filtered out.
 
+### Output safety and numeric arguments
+
+Input POD5 files and the background cache must not alias the output FAST5,
+conversion report, pending report, or temporary SQLite index/sidecar paths.
+Output artifacts must also be distinct from each other. The converter checks
+resolved paths and existing hard links **before indexing or changing any files**.
+`--force` permits replacing ordinary outputs; it does not bypass collision
+protection. Do not change input files or path links while conversion is running.
+
+`--channels` and `--chunk-samples` must be positive integers. Zero, negative, and
+fractional values are rejected by the CLI. Omitting these flags preserves the
+usual defaults (at least 512 channels and 180,480 samples per chunk).
+
 ### Full-run versus compact timing
 
 The default `--timeline source --time-origin absolute` preserves acquisition
@@ -175,6 +188,7 @@ The flags are also printed when conversion finishes. See the
 The report is published only after the FAST5 has been written and closed.
 Existing output/report files require `--force`; a forced rebuild removes the
 old report first so a failed rebuild cannot leave a stale success report.
+Path-collision and CLI argument errors are rejected before that removal.
 Reports are generated for new conversions only; old indexes cannot recover
 previously discarded read counts. Reports include source metadata and paths,
 so review them before sharing.

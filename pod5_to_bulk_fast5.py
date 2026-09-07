@@ -76,6 +76,21 @@ def expand_inputs(values: Sequence[str]) -> list[Path]:
     return unique
 
 
+def reject_path_collisions(inputs: dict[str, Path], outputs: dict[str, Path]) -> None:
+    """Check before mutation, including symlink and existing hard-link aliases."""
+    seen = list(inputs.items())
+    for label, path in outputs.items():
+        for other_label, other in seen:
+            same_path = path.resolve() == other.resolve()
+            same_file = path.exists() and other.exists() and path.samefile(other)
+            if same_path or same_file:
+                raise ValueError(
+                    f"Path collision: {label} ({path}) aliases {other_label} ({other}); "
+                    "choose distinct paths, even with --force"
+                )
+        seen.append((label, path))
+
+
 def set_string_attrs(group: h5py.Group, values: dict) -> None:
     for key, value in values.items():
         if value is None:
@@ -96,6 +111,7 @@ def compression_args(name: str) -> dict:
 def make_background(args: argparse.Namespace) -> None:
     source = Path(args.template).resolve()
     output = Path(args.output).resolve()
+    reject_path_collisions({"donor bulk FAST5": source}, {"background output": output})
     if output.exists() and not args.force:
         raise FileExistsError(f"Refusing to overwrite {output}; use --force")
     output.parent.mkdir(parents=True, exist_ok=True)
@@ -639,12 +655,23 @@ def convert(args: argparse.Namespace) -> None:
     output = Path(args.output).resolve()
     cache_path = Path(args.background_cache).resolve()
     tmp_dir = Path(args.tmp_dir).resolve()
-    tmp_dir.mkdir(parents=True, exist_ok=True)
     database = tmp_dir / "pod5_bulk_index.sqlite"
     report_path = output.with_suffix(output.suffix + ".report.json")
+    pending = report_path.with_suffix(report_path.suffix + ".tmp")
+    reject_path_collisions(
+        {**{f"POD5 input {i}": path for i, path in enumerate(inputs, 1)}, "background cache": cache_path},
+        {
+            "bulk FAST5 output": output, "conversion report": report_path,
+            "pending conversion report": pending, "temporary index": database,
+            "SQLite journal": Path(str(database) + "-journal"),
+            "SQLite WAL": Path(str(database) + "-wal"),
+            "SQLite shared memory": Path(str(database) + "-shm"),
+        },
+    )
     for path in (output, report_path):
         if path.exists() and not args.force:
             raise FileExistsError(f"Refusing to overwrite {path}; use --force")
+    tmp_dir.mkdir(parents=True, exist_ok=True)
     # Do not leave an old success report beside an interrupted forced rebuild.
     report_path.unlink(missing_ok=True)
 
@@ -736,7 +763,6 @@ def convert(args: argparse.Namespace) -> None:
     report = conversion_report(
         args, summary, inputs, output, cache_path, database, origin, duration, channels,
     )
-    pending = report_path.with_suffix(report_path.suffix + ".tmp")
     pending.write_text(json.dumps(report, indent=2) + "\n", encoding="utf-8")
     pending.replace(report_path)
     log(f"Conversion report: {report_path}")
@@ -826,8 +852,8 @@ def parser() -> argparse.ArgumentParser:
     c.add_argument("--auxiliary", choices=("none", "reconstructed"), default="reconstructed")
     c.add_argument("--device-metadata", action=argparse.BooleanOptionalAction, default=True)
     c.add_argument("--compression", choices=("vbz", "gzip", "none"), default="vbz")
-    c.add_argument("--chunk-samples", type=int, default=180480)
-    c.add_argument("--channels", type=int, help="Testing only; defaults to at least 512")
+    c.add_argument("--chunk-samples", type=positive_integer, default=180480, help="Positive signal chunk size in samples (default: 180480)")
+    c.add_argument("--channels", type=positive_integer, help="Testing only: positive channel count; defaults to at least 512")
     duration_options = c.add_mutually_exclusive_group()
     duration_options.add_argument(
         "--duration-seconds", type=positive_seconds,

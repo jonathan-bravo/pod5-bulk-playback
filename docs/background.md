@@ -37,6 +37,9 @@ curl -L -o GXB02001_20230509_1250_FAW79338_X3_sequencing_run_NA12878_B1_19382aa5
   https://s3.amazonaws.com/nanopore-human-wgs/bulkfile/GXB02001_20230509_1250_FAW79338_X3_sequencing_run_NA12878_B1_19382aa5_ef4362cd.fast5
 ```
 
+The cache output must be distinct from the donor bulk FAST5, including symlink
+and hard-link aliases. `--force` cannot override this protection.
+
 The donor bulk FAST5 is only required when rebuilding the cache. The command
 reads the state tables and short signal slices classified as `pore`; it does not
 read the complete 22 GB signal.
