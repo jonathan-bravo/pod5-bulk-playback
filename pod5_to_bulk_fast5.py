@@ -441,7 +441,7 @@ def write_auxiliary_channel(out: h5py.File, cache: h5py.File, channel: int, rows
     names = set(read_dtype.names or ())
     for i, row in enumerate(rows):
         start = int(row[4]) - origin
-        length = min(int(row[5]), max(0, duration - start))
+        length = max(0, min(duration, start + int(row[5])) - max(0, start))
         values = {
             "read_id": row[1].encode(), "end_reason": END_REASON.get(row[7], 0),
             "read_number": row[6], "read_start": max(0, start), "read_length": length,
@@ -485,7 +485,7 @@ def write_auxiliary_channel(out: h5py.File, cache: h5py.File, channel: int, rows
     events = [(0, STATE_PORE)]
     for row in rows:
         start = max(0, int(row[4]) - origin)
-        end = min(duration, start + int(row[5]))
+        end = min(duration, int(row[4]) - origin + int(row[5]))
         if start < duration:
             events.append((start, STATE_STRAND))
         if end < duration:
@@ -515,6 +515,24 @@ def positive_seconds(value: str) -> float:
     return seconds
 
 
+def nonnegative_seconds(value: str) -> float:
+    seconds = float(value)
+    if not math.isfinite(seconds) or seconds < 0:
+        raise argparse.ArgumentTypeError("window start must be finite and nonnegative")
+    return seconds
+
+
+def window_predicate(origin: int, duration: int, complete_only: bool) -> tuple[str, tuple]:
+    """Half-open intersection, optionally restricted to fully contained reads."""
+    end = origin + duration
+    condition = "start < ? AND start+samples > ?"
+    params = (end, origin)
+    if complete_only:
+        condition += " AND start >= ? AND start+samples <= ?"
+        params += (origin, end)
+    return condition, params
+
+
 def resolve_timeline(args, summary: dict) -> tuple[int, int]:
     """Choose bounds independently of which read signals are retained."""
     rate = int(summary["run_info"]["sample_rate"])
@@ -525,13 +543,16 @@ def resolve_timeline(args, summary: dict) -> tuple[int, int]:
     else:
         first, last = summary["min_start"], summary["max_end"]
     origin = int(first) if args.time_origin == "rebase" else 0
+    origin += int(round(args.window_start_seconds * rate))
+    if origin >= int(last):
+        raise ValueError("Window start must precede the end of the selected timeline")
     duration = int(last) - origin
     if args.duration_seconds is not None:
         requested = int(round(args.duration_seconds * rate))
         if requested < duration:
             raise ValueError(
                 "--duration-seconds cannot shorten the selected timeline; "
-                "use --max-duration-seconds for a clipped test"
+                "use --max-duration-seconds for a test window"
             )
         duration = requested
     if args.max_duration_seconds is not None:
@@ -555,7 +576,7 @@ def conversion_report(args, summary, inputs, output, cache_path, database, origi
         "--simulation", f"/tmp/.dorado/{output.name}",
     ]
     with sqlite3.connect(f"{database.as_uri()}?mode=ro", uri=True) as con:
-        intersecting, clipped = con.execute(
+        intersecting, crossing = con.execute(
             "SELECT count(*), coalesce(sum(start < ? OR start+samples > ?), 0) "
             "FROM reads WHERE channel BETWEEN 1 AND ? AND start < ? AND start+samples > ?",
             (origin, origin + duration, channels, origin + duration, origin),
@@ -572,7 +593,11 @@ def conversion_report(args, summary, inputs, output, cache_path, database, origi
         "reads": {
             "total": summary["total"], "retained_in_index": summary["kept"],
             "excluded_forced": summary["removed"], "end_reasons": summary["end_reasons"],
-            "intersecting_output": intersecting, "clipped_at_output_boundary": clipped,
+            "intersecting_output": intersecting,
+            "boundary_crossing_reads": crossing,
+            "selected_for_overlay": intersecting - crossing if args.complete_reads_only else intersecting,
+            "excluded_at_output_boundary": crossing if args.complete_reads_only else 0,
+            "clipped_at_output_boundary": 0 if args.complete_reads_only else crossing,
             "retained_outside_output": summary["kept"] - intersecting,
         },
         "timeline": {
@@ -587,6 +612,7 @@ def conversion_report(args, summary, inputs, output, cache_path, database, origi
         "settings": {key: getattr(args, key) for key in (
             "timeline", "time_origin", "duration_seconds", "exclude_forced", "auxiliary", "device_metadata",
             "compression", "chunk_samples", "channels", "max_duration_seconds",
+            "window_start_seconds", "complete_reads_only",
         )},
         "recommended_simulation": {
             "flags": flags, "shell_flags": shlex.join(flags),
@@ -641,13 +667,14 @@ def convert(args: argparse.Namespace) -> None:
             }
             comp = compression_args(args.compression)
             chunk_size = min(args.chunk_samples, max(1, duration))
+            condition, window_params = window_predicate(origin, duration, args.complete_reads_only)
             for channel in range(1, channels + 1):
                 rows = con.execute(
                     "SELECT file_id,read_id,channel,well,start,samples,read_number,end_reason,forced,"
                     "median_before,offset,scale,num_events,tracked_scale,tracked_shift,predicted_scale,"
                     "predicted_shift,reads_since_mux,time_since_mux FROM reads "
-                    "WHERE channel=? AND start < ? AND start+samples > ? ORDER BY start",
-                    (channel, origin + duration, origin),
+                    f"WHERE channel=? AND {condition} ORDER BY start",
+                    (channel, *window_params),
                 ).fetchall()
                 if rows:
                     target_offset, target_scale = float(rows[0][10]), float(rows[0][11])
@@ -713,6 +740,8 @@ def convert(args: argparse.Namespace) -> None:
     pending.write_text(json.dumps(report, indent=2) + "\n", encoding="utf-8")
     pending.replace(report_path)
     log(f"Conversion report: {report_path}")
+    if report["reads"]["selected_for_overlay"] == 0:
+        log("WARNING: No retained reads selected for this window/channel range; output is background-only.")
     log("Recommended simulation flags (edit position/container path if needed):")
     log(report["recommended_simulation"]["shell_flags"])
     log(f"Wrote bulk playback FAST5: {output}")
@@ -770,6 +799,14 @@ def parser() -> argparse.ArgumentParser:
         "--time-origin", choices=("rebase", "absolute"), default="absolute",
         help="Start at acquisition zero (default), or the first read in the selected timeline",
     )
+    c.add_argument(
+        "--window-start-seconds", type=nonnegative_seconds, default=0.0,
+        help="Test-window offset from the selected time origin (default: 0 seconds)",
+    )
+    c.add_argument(
+        "--complete-reads-only", action="store_true",
+        help="Skip reads crossing either output boundary instead of clipping them; independent of forced-read filtering",
+    )
     c.add_argument("--exclude-forced", action=argparse.BooleanOptionalAction, default=True)
     c.add_argument("--auxiliary", choices=("none", "reconstructed"), default="reconstructed")
     c.add_argument("--device-metadata", action=argparse.BooleanOptionalAction, default=True)
@@ -779,11 +816,11 @@ def parser() -> argparse.ArgumentParser:
     duration_options = c.add_mutually_exclusive_group()
     duration_options.add_argument(
         "--duration-seconds", type=positive_seconds,
-        help="Explicit output length from the chosen origin; may extend but not shorten the timeline",
+        help="Explicit output length from the window start; may extend but not shorten the remaining timeline",
     )
     duration_options.add_argument(
         "--max-duration-seconds", type=positive_seconds,
-        help="Testing only: cap output length from the chosen origin; may clip reads",
+        help="Testing only: cap output length from the window start; clips reads unless --complete-reads-only is set",
     )
     c.add_argument("--force", action="store_true")
     c.set_defaults(func=convert)

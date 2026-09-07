@@ -127,17 +127,49 @@ absolute origin, a known 22-hour experiment can use:
 ```
 
 This specifies total output length from the chosen origin, not extra padding.
-It may extend the selected timeline with background but cannot shorten it.
-`--max-duration-seconds` instead caps output length for tests and may still clip
-reads at the boundary. These options are mutually exclusive. Complete-read test
-window selection is not implemented yet. Conversions still fail if no reads
-remain after filtering.
+If a window-start offset is supplied, length is measured from that window start.
+It may extend the remaining selected timeline with background but cannot shorten
+it. `--max-duration-seconds` instead caps output length for tests. These options
+are mutually exclusive. Conversions still fail if no reads remain after
+forced-read filtering.
 
 **Compatibility:** the default used to be retained/rebased timing. Add
 `--timeline retained --time-origin rebase` to reproduce that behavior.
 
 The metadata index is retained as `tmp/pod5_bulk_index.sqlite` for auditing.
 Only one channel's read signals are held in memory at a time.
+
+### Complete-read test windows
+
+Use `--complete-reads-only` to omit reads crossing either output boundary rather
+than clipping their signal. For a 30-second window starting ten minutes after
+acquisition start, append:
+
+```bash
+--window-start-seconds 600 \
+--max-duration-seconds 30 \
+--complete-reads-only
+```
+
+The start offset defaults to zero and is measured from the chosen time origin:
+acquisition start for `--time-origin absolute`, or the earliest read in the
+selected timeline for `--time-origin rebase`. Seconds are rounded to the nearest
+sample. The window must start before the selected timeline ends, and its length
+is capped by the remaining timeline unless explicitly extended with
+`--duration-seconds`. Source window start becomes sample zero in the output.
+
+A read is included only if it starts at or after the window start and ends at
+or before the window end. Exact boundary fits are included. Reads ending at the
+window start or starting at its end are outside the window. Skipped reads leave
+background behind; reads are not moved together or extended. The same selection
+is used for raw signal and reconstructed read/mux/state tables. If no reads fit,
+the output is background-only and a warning is printed.
+
+This option is independent of forced-read filtering: use `--no-exclude-forced`
+if you also want to retain recorded unblock/mux-change reads that fit the window.
+"Complete" here means the entire **recorded signal**, not necessarily an entire
+molecule. Without `--complete-reads-only`, boundary-crossing reads are still
+clipped, preserving the previous test-window behavior.
 
 ## Automatic conversion report and playback flags
 
@@ -148,8 +180,10 @@ counts, counts by end reason, source and retained timing, output duration,
 conversion settings, and recommended MinKNOW simulation flags.
 
 Retained index reads and reads intersecting the actual output are reported
-separately, including boundary-clipped reads and reads outside the requested
-channel/time window. These are metadata counts, not proof of signal integrity
+separately, including reads selected for overlay, boundary-crossing reads,
+reads excluded at the boundary, reads actually clipped, and reads outside the
+requested channel/time window. Boundary exclusion counts are separate from
+forced-read exclusions. These are metadata counts, not proof of signal integrity
 or successful playback. Source timing ends at the latest supplied read, not
 necessarily the original experiment stop time.
 
@@ -196,7 +230,8 @@ python pod5_to_bulk_fast5.py convert ../FAX54151_4f394667_45b25379_8.pod5 \
   --channels 512 \
   --timeline retained \
   --time-origin rebase \
-  --max-duration-seconds 30
+  --max-duration-seconds 30 \
+  --complete-reads-only
 
 python pod5_to_bulk_fast5.py validate tmp/test_512ch_30s.fast5
 ```
