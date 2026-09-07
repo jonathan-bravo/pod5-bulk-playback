@@ -768,6 +768,18 @@ def validate(args: argparse.Namespace) -> None:
         }, indent=2))
 
 
+def positive_integer(value: str) -> int:
+    number = int(value)
+    if number <= 0:
+        raise argparse.ArgumentTypeError("value must be greater than zero")
+    return number
+
+
+def audit(args: argparse.Namespace) -> None:
+    from signal_integrity_audit import audit as run_audit
+    run_audit(args, sys.modules[__name__])
+
+
 def parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(description=__doc__)
     sub = p.add_subparsers(dest="command", required=True)
@@ -831,6 +843,17 @@ def parser() -> argparse.ArgumentParser:
     v = sub.add_parser("validate", help="Perform structural checks without scanning signal")
     v.add_argument("fast5")
     v.set_defaults(func=validate)
+
+    a = sub.add_parser("audit", help="Compare retained POD5 ADC samples and calibration against a completed bulk FAST5")
+    a.add_argument("fast5")
+    a.add_argument("--report", help="Conversion report (default: <fast5>.report.json)")
+    a.add_argument("--mode", choices=("sampled", "full"), default="sampled")
+    a.add_argument("--reads", type=positive_integer, default=1000, help="Sampled-mode read budget (default: 1000); ignored in full mode")
+    a.add_argument("--seed", type=int, default=42, help="Reproducible sampled selection seed (default: 42)")
+    a.add_argument("--chunk-samples", type=positive_integer, default=180480, help="FAST5 comparison slice size; source memory is bounded by one read")
+    a.add_argument("--tmp-dir", help="Existing parent directory for a private temporary metadata index (default: system temp)")
+    a.add_argument("--force", action="store_true", help="Replace an existing <fast5>.audit.json, never the FAST5 or conversion report")
+    a.set_defaults(func=audit)
     return p
 
 
