@@ -18,6 +18,7 @@ import glob
 import json
 import math
 import os
+import shlex
 import sqlite3
 import sys
 import uuid
@@ -268,6 +269,8 @@ def build_index(inputs: list[Path], database: Path, exclude_forced: bool) -> dic
     con = sqlite3.connect(database)
     con.executescript(INDEX_SCHEMA)
     total = kept = removed = 0
+    end_reasons = collections.defaultdict(lambda: {"total": 0, "retained": 0, "excluded": 0})
+    source_start = source_end = None
     try:
         for file_id, path in enumerate(inputs):
             con.execute("INSERT INTO files(id,path) VALUES (?,?)", (file_id, str(path)))
@@ -276,9 +279,17 @@ def build_index(inputs: list[Path], database: Path, exclude_forced: bool) -> dic
                 for read in reader.reads():
                     total += 1
                     forced = int(read.end_reason.forced)
+                    start = int(read.start_sample)
+                    end = start + int(read.sample_count)
+                    source_start = start if source_start is None else min(source_start, start)
+                    source_end = end if source_end is None else max(source_end, end)
+                    counts = end_reasons[read.end_reason.name]
+                    counts["total"] += 1
                     if exclude_forced and forced:
                         removed += 1
+                        counts["excluded"] += 1
                         continue
+                    counts["retained"] += 1
                     ri = read.run_info
                     info = run_info_dict(ri)
                     con.execute(
@@ -330,6 +341,8 @@ def build_index(inputs: list[Path], database: Path, exclude_forced: bool) -> dic
         info = json.loads(runs[0][1])
         return {
             "total": total, "kept": kept, "removed": removed,
+            "end_reasons": dict(end_reasons),
+            "source_min_start": source_start, "source_max_end": source_end,
             "min_start": int(min_start), "max_end": int(max_end),
             "max_channel": int(max_channel), "run_info": info,
         }
@@ -494,6 +507,73 @@ def write_auxiliary_channel(out: h5py.File, cache: h5py.File, channel: int, rows
     group.create_dataset("States", data=states, maxshape=(None,), chunks=True, compression="gzip", compression_opts=1)
 
 
+def conversion_report(args, summary, inputs, output, cache_path, database, origin, duration, channels):
+    """Describe the completed artifact, without changing conversion policy."""
+    info = summary["run_info"]
+    rate = int(info["sample_rate"])
+    hours = max(1, math.ceil(duration / (rate * 3600)))
+    product = str(info.get("flow_cell_product_code") or "<PRODUCT_CODE>").upper()
+    kit = str(info.get("sequencing_kit") or "<KIT>").upper()
+    flags = [
+        "--position", "MS00000", "--product-code", product, "--kit", kit,
+        "--experiment-duration", str(hours),
+        "--fastq", "--bam", "--pod5", "--verbose", "--basecalling",
+        "--simulation", f"/tmp/.dorado/{output.name}",
+    ]
+    with sqlite3.connect(f"{database.as_uri()}?mode=ro", uri=True) as con:
+        intersecting, clipped = con.execute(
+            "SELECT count(*), coalesce(sum(start < ? OR start+samples > ?), 0) "
+            "FROM reads WHERE channel BETWEEN 1 AND ? AND start < ? AND start+samples > ?",
+            (origin, origin + duration, channels, origin + duration, origin),
+        ).fetchone()
+    return {
+        "report_version": 1,
+        "status": "conversion_completed",
+        "created_at": dt.datetime.now(dt.timezone.utc).isoformat(),
+        "output": str(output), "output_bytes": output.stat().st_size,
+        "inputs": [{"path": str(p), "bytes": p.stat().st_size} for p in inputs],
+        "input_file_count": len(inputs),
+        "background_cache": str(cache_path), "index": str(database),
+        "run_info": info,
+        "reads": {
+            "total": summary["total"], "retained_in_index": summary["kept"],
+            "excluded_forced": summary["removed"], "end_reasons": summary["end_reasons"],
+            "intersecting_output": intersecting, "clipped_at_output_boundary": clipped,
+            "retained_outside_output": summary["kept"] - intersecting,
+        },
+        "timeline": {
+            "sample_rate": rate, "channels": channels,
+            "source_first_read_start_sample": summary["source_min_start"],
+            "source_last_read_end_sample": summary["source_max_end"],
+            "retained_first_read_start_sample": summary["min_start"],
+            "retained_last_read_end_sample": summary["max_end"],
+            "output_origin_sample": origin, "duration_samples": duration,
+            "duration_seconds": duration / rate, "duration_hours": duration / rate / 3600,
+        },
+        "settings": {key: getattr(args, key) for key in (
+            "time_origin", "exclude_forced", "auxiliary", "device_metadata",
+            "compression", "chunk_samples", "channels", "max_duration_seconds",
+        )},
+        "recommended_simulation": {
+            "flags": flags, "shell_flags": shlex.join(flags),
+            "notes": [
+                "Append these flags to your installed MinKNOW start_protocol.py command.",
+                "Position MS00000 and the container simulation path are editable assumptions.",
+                "Experiment duration is in hours, rounded up from the generated signal duration (minimum 1).",
+                "This is a protocol time limit, not a guarantee of playback end-of-file behavior.",
+                "Kit and product code come from POD5 metadata; verify installed protocol support.",
+                "Replace <KIT> or <PRODUCT_CODE> if source metadata is missing.",
+                "FASTQ output may be compressed; compare read/base counts rather than file sizes.",
+            ],
+        },
+        "limitations": [
+            "Conversion completion is not a signal-integrity or playback validation.",
+            "POD5 cannot establish experiment stop time after the last supplied read.",
+            "Intersecting read counts do not establish unique recovery of overlapping reads.",
+        ],
+    }
+
+
 def convert(args: argparse.Namespace) -> None:
     inputs = expand_inputs(args.inputs)
     output = Path(args.output).resolve()
@@ -501,8 +581,12 @@ def convert(args: argparse.Namespace) -> None:
     tmp_dir = Path(args.tmp_dir).resolve()
     tmp_dir.mkdir(parents=True, exist_ok=True)
     database = tmp_dir / "pod5_bulk_index.sqlite"
-    if output.exists() and not args.force:
-        raise FileExistsError(f"Refusing to overwrite {output}; use --force")
+    report_path = output.with_suffix(output.suffix + ".report.json")
+    for path in (output, report_path):
+        if path.exists() and not args.force:
+            raise FileExistsError(f"Refusing to overwrite {path}; use --force")
+    # Do not leave an old success report beside an interrupted forced rebuild.
+    report_path.unlink(missing_ok=True)
 
     summary = build_index(inputs, database, args.exclude_forced)
     info = summary["run_info"]
@@ -591,6 +675,15 @@ def convert(args: argparse.Namespace) -> None:
             out.flush()
     finally:
         con.close()
+    report = conversion_report(
+        args, summary, inputs, output, cache_path, database, origin, duration, channels,
+    )
+    pending = report_path.with_suffix(report_path.suffix + ".tmp")
+    pending.write_text(json.dumps(report, indent=2) + "\n", encoding="utf-8")
+    pending.replace(report_path)
+    log(f"Conversion report: {report_path}")
+    log("Recommended simulation flags (edit position/container path if needed):")
+    log(report["recommended_simulation"]["shell_flags"])
     log(f"Wrote bulk playback FAST5: {output}")
     log(f"Index retained for audit: {database}")
 

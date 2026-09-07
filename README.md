@@ -102,6 +102,51 @@ larger. Do not combine POD5 files with different acquisition IDs.
 The metadata index is retained as `tmp/pod5_bulk_index.sqlite` for auditing.
 Only one channel's read signals are held in memory at a time.
 
+## Automatic conversion report and playback flags
+
+Every successful conversion writes an indented JSON report beside the FAST5:
+`bacterial_playback.fast5.report.json`. No extra flag is required. The report
+contains input paths and sizes, run metadata, total/retained/excluded read
+counts, counts by end reason, source and retained timing, output duration,
+conversion settings, and recommended MinKNOW simulation flags.
+
+Retained index reads and reads intersecting the actual output are reported
+separately, including boundary-clipped reads and reads outside the requested
+channel/time window. These are metadata counts, not proof of signal integrity
+or successful playback. Source timing ends at the latest supplied read, not
+necessarily the original experiment stop time.
+
+The `recommended_simulation.shell_flags` field is ready to append to your
+installed `start_protocol.py` command. For the 21.03-hour bacterial example:
+
+```bash
+--position MS00000 \
+--product-code FLO-MIN114 \
+--kit SQK-RBK114-24 \
+--experiment-duration 22 \
+--fastq --bam --pod5 --verbose --basecalling \
+--simulation /tmp/.dorado/bacterial_playback.fast5
+```
+
+Kit and product code are taken from POD5 metadata and uppercased. Missing
+values become explicit placeholders. Duration is computed from the **generated
+FAST5**, rounded up to whole hours (minimum one hour). Thus a 30-second test
+recommends one hour, not 22. This flag sets a protocol time limit; it does not
+guarantee how playback behaves at end-of-file. In particular,
+`--experiment-duration 1` stops an overnight replay after one hour.
+
+`MS00000` and `/tmp/.dorado/<output filename>` are editable simulation defaults,
+not values inferred from the original device. Verify those settings and that
+the installed MinKNOW version supports the source kit/product combination.
+The flags are also printed when conversion finishes.
+
+The report is published only after the FAST5 has been written and closed.
+Existing output/report files require `--force`; a forced rebuild removes the
+old report first so a failed rebuild cannot leave a stale success report.
+Reports are generated for new conversions only; old indexes cannot recover
+previously discarded read counts. Reports include source metadata and paths,
+so review them before sharing.
+
 ## Small verification run
 
 Before creating a many-hour output, test 512 channels and 30 seconds:
